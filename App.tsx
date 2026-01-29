@@ -1,152 +1,192 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { Product, Order, OrderItem, Category, PaymentMethod, BusinessConfig, User, OrderStatus } from './types';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Product, Order, OrderItem, Category, PaymentMethod, BusinessConfig, OrderStatus, Activity } from './types';
 import { INITIAL_PRODUCTS } from './constants';
-import { generateBusinessAdvice } from './services/geminiService';
 
 const App: React.FC = () => {
-  // --- CHAVES DO BANCO DE DADOS LOCAL ---
-  const DB_USERS = 'MEME_LANCHE_USERS_DB';
-  const DB_SESSION = 'MEME_LANCHE_SESSION';
-  const DB_CONFIG = 'MEME_LANCHE_CONFIG';
-  const DB_PRODUCTS = 'MEME_LANCHE_PRODUCTS';
-  const DB_ORDERS = 'MEME_LANCHE_ORDERS';
+  // --- CONSTANTES DE PERSISTÊNCIA ---
+  const DB_KEYS = {
+    CONFIG: 'MEME_LANCHE_CONFIG_V2',
+    PRODUCTS: 'MEME_LANCHE_PRODUCTS_V2',
+    ORDERS: 'MEME_LANCHE_ORDERS_V2',
+    LOGS: 'MEME_LANCHE_LOGS_V2',
+    LAST_EMAIL: 'MEME_LANCHE_LAST_EMAIL',
+    DEVICE_ID: 'MEME_LANCHE_DEVICE_ID'
+  };
 
-  // --- ESTADOS DE AUTENTICAÇÃO ---
-  const [user, setUser] = useState<User | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(true);
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPass, setAuthPass] = useState('');
-  const [authName, setAuthName] = useState('');
-  const [isRegistering, setIsRegistering] = useState(false);
+  // --- IDENTIFICAÇÃO ÚNICA (DEVICE/IP SIMULADO) ---
+  const [deviceId] = useState(() => {
+    let id = localStorage.getItem(DB_KEYS.DEVICE_ID);
+    if (!id) {
+      id = 'dev_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+      localStorage.setItem(DB_KEYS.DEVICE_ID, id);
+    }
+    return id;
+  });
 
-  // --- ESTADOS DE NEGÓCIO ---
+  // --- UTILITÁRIO DE FORMATAÇÃO ---
+  const formatCurrency = (value: number) => {
+    return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  };
+
+  // --- ESTADOS DA APLICAÇÃO ---
   const [isAdminMode, setIsAdminMode] = useState(false);
   const [showAdminPinModal, setShowAdminPinModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showCartDrawer, setShowCartDrawer] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [viewingOrder, setViewingOrder] = useState<Order | null>(null);
   const [adminPinInput, setAdminPinInput] = useState('');
-  
   const [cart, setCart] = useState<OrderItem[]>([]);
   const [activeCategory, setActiveCategory] = useState<Category | 'Todos'>('Todos');
   const [isProcessingOrder, setIsProcessingOrder] = useState(false);
-  const [activeOrder, setActiveOrder] = useState<Order | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [adminTab, setAdminTab] = useState<'dashboard' | 'sales' | 'inventory' | 'settings'>('dashboard');
-  const [toast, setToast] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
-
-  // --- ESTADOS DE IA ---
-  const [aiAdvice, setAiAdvice] = useState<string>('');
-  const [isLoadingAi, setIsLoadingAi] = useState(false);
-
-  // --- ESTADO DE NOVO PRODUTO ---
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [adminTab, setAdminTab] = useState<'resumo' | 'pedidos' | 'cardapio' | 'ajustes' | 'logs'>('resumo');
+  const [toast, setToast] = useState<{msg: string, type: 'success' | 'error' | 'alert'} | null>(null);
+  const [searchSales, setSearchSales] = useState('');
+  
+  // Estados de Formulário
+  const [phoneInput, setPhoneInput] = useState('');
+  const [isEditing, setIsEditing] = useState<string | null>(null);
   const [newProduct, setNewProduct] = useState<Partial<Product>>({
     name: '', price: 0, description: '', category: 'Hambúrgueres', image: '', stock: 100
   });
 
-  // --- PERSISTÊNCIA ---
+  const prevOrdersCount = useRef(0);
+  const [lastOrderEmail, setLastOrderEmail] = useState(localStorage.getItem(DB_KEYS.LAST_EMAIL) || '');
+
+  // --- CARREGAMENTO INICIAL COM TRATAMENTO DE ERRO ---
   const [config, setConfig] = useState<BusinessConfig>(() => {
-    const saved = localStorage.getItem(DB_CONFIG);
-    return saved ? JSON.parse(saved) : {
-      isOpen: true,
-      adminKey: '777',
-      storeName: 'MEME LANCHE',
-      deliveryFee: 7.00,
-      whatsappNumber: '5522998641962',
-      formspreeId: 'xzzzbzoe'
-    };
+    try {
+      const saved = localStorage.getItem(DB_KEYS.CONFIG);
+      return saved ? JSON.parse(saved) : {
+        isOpen: true, adminKey: '777', storeName: 'MEME LANCHE',
+        deliveryFee: 7.00, whatsappNumber: '5522988443453', formspreeId: ''
+      };
+    } catch { return { isOpen: true, adminKey: '777', storeName: 'MEME LANCHE', deliveryFee: 7.00, whatsappNumber: '5522988443453', formspreeId: '' }; }
   });
 
   const [products, setProducts] = useState<Product[]>(() => {
-    const saved = localStorage.getItem(DB_PRODUCTS);
-    return saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
+    try {
+      const saved = localStorage.getItem(DB_KEYS.PRODUCTS);
+      return saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
+    } catch { return INITIAL_PRODUCTS; }
   });
 
-  // --- INICIALIZAÇÃO E AUTO-LOGIN ---
   useEffect(() => {
-    const init = () => {
-      const activeEmail = localStorage.getItem(DB_SESSION);
-      if (activeEmail) {
-        const users = JSON.parse(localStorage.getItem(DB_USERS) || '[]');
-        const found = users.find((u: User) => u.email === activeEmail);
-        if (found) setUser(found);
-      }
-      const savedOrders = JSON.parse(localStorage.getItem(DB_ORDERS) || '[]');
+    try {
+      const savedOrders = JSON.parse(localStorage.getItem(DB_KEYS.ORDERS) || '[]');
+      const savedLogs = JSON.parse(localStorage.getItem(DB_KEYS.LOGS) || '[]');
       setOrders(savedOrders);
-      setIsAuthLoading(false);
-    };
-    init();
+      setActivities(savedLogs);
+      prevOrdersCount.current = savedOrders.length;
+    } catch (e) { console.error("Erro ao carregar banco de dados local", e); }
   }, []);
 
-  // Monitorar pedido ativo do usuário logado
+  // --- SINCRONIZAÇÃO PERSISTENTE ---
   useEffect(() => {
-    if (user) {
-      const myRecent = orders.find(o => o.customerEmail === user.email && o.status !== 'Cancelado' && o.status !== 'Enviado');
-      setActiveOrder(myRecent || null);
+    if (orders.length > prevOrdersCount.current) {
+      if (isAdminMode) playNotificationSound();
+      prevOrdersCount.current = orders.length;
     }
-  }, [orders, user]);
+    localStorage.setItem(DB_KEYS.ORDERS, JSON.stringify(orders));
+  }, [orders, isAdminMode]);
 
-  // Sincronizar com LocalStorage
-  useEffect(() => { localStorage.setItem(DB_CONFIG, JSON.stringify(config)); }, [config]);
-  useEffect(() => { localStorage.setItem(DB_PRODUCTS, JSON.stringify(products)); }, [products]);
-  useEffect(() => { localStorage.setItem(DB_ORDERS, JSON.stringify(orders)); }, [orders]);
+  useEffect(() => { localStorage.setItem(DB_KEYS.CONFIG, JSON.stringify(config)); }, [config]);
+  useEffect(() => { localStorage.setItem(DB_KEYS.PRODUCTS, JSON.stringify(products)); }, [products]);
+  useEffect(() => { localStorage.setItem(DB_KEYS.LOGS, JSON.stringify(activities)); }, [activities]);
 
-  // --- HELPERS ---
-  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+  // --- MEMOIZAÇÕES DE PERFORMANCE ---
+  const filteredProducts = useMemo(() => 
+    products.filter(p => activeCategory === 'Todos' || p.category === activeCategory),
+    [products, activeCategory]
+  );
 
-  const handleAuth = (e: React.FormEvent) => {
-    e.preventDefault();
-    const users = JSON.parse(localStorage.getItem(DB_USERS) || '[]');
-    if (isRegistering) {
-      if (users.find((u: User) => u.email === authEmail)) return showToast("E-mail já cadastrado", "error");
-      const newUser = { 
-        name: authName, 
-        email: authEmail, 
-        password: authPass, 
-        photo: `https://ui-avatars.com/api/?name=${authName}&background=c4a661&color=000` 
-      };
-      localStorage.setItem(DB_USERS, JSON.stringify([...users, newUser]));
-      login(newUser);
-    } else {
-      const found = users.find((u: any) => u.email === authEmail && u.password === authPass);
-      if (found) login(found);
-      else showToast("E-mail ou senha incorretos", "error");
-    }
-  };
+  const filteredOrders = useMemo(() => 
+    orders.filter(o => 
+      o.customerName.toLowerCase().includes(searchSales.toLowerCase()) || 
+      o.id.toLowerCase().includes(searchSales.toLowerCase())
+    ),
+    [orders, searchSales]
+  );
 
-  const login = (u: User) => {
-    setUser(u);
-    localStorage.setItem(DB_SESSION, u.email);
-    showToast(`Bem-vindo ao ${config.storeName}`);
-    setAuthPass('');
-  };
+  // Histórico específico do usuário atual (Baseado no DeviceID)
+  const myOrders = useMemo(() => 
+    orders.filter(o => o.deviceId === deviceId).sort((a, b) => b.createdAt - a.createdAt),
+    [orders, deviceId]
+  );
 
-  const handleLogout = () => {
-    localStorage.removeItem(DB_SESSION);
-    setUser(null);
-    setIsAdminMode(false);
-    setCart([]);
-    showToast("Sessão encerrada");
-  };
+  const dailyRevenue = useMemo(() => 
+    orders
+      .filter(o => new Date(o.createdAt).toDateString() === new Date().toDateString() && o.status !== 'Cancelado')
+      .reduce((a, c) => a + c.total, 0),
+    [orders]
+  );
 
   const cartTotal = useMemo(() => cart.reduce((s, i) => s + (i.product.price * i.quantity), 0), [cart]);
+  const cartCount = useMemo(() => cart.reduce((s, i) => s + i.quantity, 0), [cart]);
 
-  // --- FINALIZAÇÃO DE PEDIDO ---
+  // --- CALLBACKS OTIMIZADOS ---
+  const showToast = useCallback((msg: string, type: 'success' | 'error' | 'alert' = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const addActivity = useCallback((type: Activity['type'], message: string) => {
+    const newAct: Activity = { id: Date.now().toString(), type, message, timestamp: Date.now() };
+    setActivities(prev => [newAct, ...prev].slice(0, 50));
+  }, []);
+
+  const playNotificationSound = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime); 
+      osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.4);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(); osc.stop(ctx.currentTime + 0.4);
+    } catch {}
+  }, []);
+
+  const handlePhoneChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    let value = e.target.value.replace(/\D/g, '');
+    if (value.length > 11) value = value.slice(0, 11);
+    let formatted = value;
+    if (value.length > 2) formatted = `(${value.slice(0, 2)}) ${value.slice(2)}`;
+    if (value.length > 7) formatted = `(${value.slice(0, 2)}) ${value.slice(2, 7)}-${value.slice(7)}`;
+    setPhoneInput(formatted);
+  }, []);
+
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || cart.length === 0 || isProcessingOrder) return;
-    setIsProcessingOrder(true);
+    if (cart.length === 0 || isProcessingOrder) return;
+    if (!config.isOpen) return showToast("Loja fechada no momento", "error");
 
     const formData = new FormData(e.currentTarget as HTMLFormElement);
-    const orderId = `#M${Date.now().toString().slice(-4)}`;
+    const phoneRaw = phoneInput.replace(/\D/g, '');
+    if (phoneRaw.length < 10) return showToast("WhatsApp inválido!", "error");
+
+    setIsProcessingOrder(true);
+    const orderId = `#ML-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+    const email = (formData.get('email') as string).toLowerCase();
     const total = cartTotal + config.deliveryFee;
+
+    const rua = formData.get('rua') as string;
+    const numero = formData.get('numero') as string;
+    const bairro = formData.get('bairro') as string;
+    const referencia = formData.get('referencia') as string;
+    const fullAddress = `${rua}, ${numero} - ${bairro}${referencia ? ` (Ref: ${referencia})` : ''}`;
 
     const newOrder: Order = {
       id: orderId,
-      customerName: user.name,
-      customerPhone: formData.get('phone') as string,
-      address: formData.get('address') as string,
+      deviceId,
+      customerName: formData.get('name') as string,
+      customerPhone: phoneInput,
+      address: fullAddress,
       items: [...cart],
       subtotal: cartTotal,
       discount: 0,
@@ -154,464 +194,575 @@ const App: React.FC = () => {
       status: 'Pendente',
       paymentMethod: formData.get('payment') as PaymentMethod,
       createdAt: Date.now(),
-      customerEmail: user.email
+      customerEmail: email
     };
 
-    const waMsg = `*MEME LANCHE - PEDIDO ${orderId}*%0A%0A` + 
-      cart.map(i => `• ${i.quantity}x ${i.product.name}`).join('%0A') + 
-      `%0A%0ATOTAL: R$ ${total.toFixed(2)}%0A` +
-      `PAGAMENTO: ${newOrder.paymentMethod}%0A` +
-      `ENDEREÇO: ${newOrder.address}`;
+    const itemsList = cart.map(i => `• ${i.quantity}x ${i.product.name} (${formatCurrency(i.product.price * i.quantity)})`).join('%0A');
+    
+    // MENSAGEM WHATSAPP OTIMIZADA COM "PEDIDO FEITO" E NOME EM DESTAQUE
+    const waMsg = `*✅ Pedido feito por: ${newOrder.customerName}* %0A%0A` +
+      `*🆔 ID COMPRA:* ${orderId}%0A` +
+      `----------------------------%0A` +
+      `*📦 DETALHES DO PEDIDO*%0A${itemsList}%0A%0A` +
+      `*💰 FINANCEIRO*%0A` +
+      `Subtotal: ${formatCurrency(cartTotal)}%0A` +
+      `Entrega: ${formatCurrency(config.deliveryFee)}%0A` +
+      `*TOTAL: ${formatCurrency(total)}*%0A%0A` +
+      `*💳 PAGAMENTO*%0A${newOrder.paymentMethod}%0A%0A` +
+      `*📍 ENDEREÇO DE ENTREGA*%0A${fullAddress}%0A%0A` +
+      `_Enviado pelo dispositivo: ${deviceId.slice(-6).toUpperCase()}_`;
 
     try {
-      await fetch(`https://formspree.io/f/${config.formspreeId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newOrder)
-      });
-      
+      localStorage.setItem(DB_KEYS.LAST_EMAIL, email);
+      setLastOrderEmail(email);
       setOrders(prev => [newOrder, ...prev]);
+      addActivity('ORDER', `Novo pedido: ${orderId} (Device: ${deviceId.slice(-6)})`);
       setCart([]);
-      showToast("Pedido Processado!");
+      setPhoneInput('');
+      setShowCartDrawer(false);
+      
+      // Abrir WhatsApp com a mensagem estruturada
       window.open(`https://wa.me/${config.whatsappNumber}?text=${waMsg}`, '_blank');
-    } catch (err) {
-      showToast("Erro no servidor de e-mail", "error");
-    } finally {
-      setIsProcessingOrder(false);
+      showToast(`Pedido de ${newOrder.customerName} Gerado!`);
+    } catch { 
+      showToast("Erro ao processar pedido", "error"); 
+    } finally { 
+      setIsProcessingOrder(false); 
     }
   };
 
-  // --- IA ADVISOR ---
-  const handleAiAdvice = async () => {
-    setIsLoadingAi(true);
-    const history = JSON.stringify(orders.slice(0, 10));
-    const advice = await generateBusinessAdvice(history);
-    setAiAdvice(advice);
-    setIsLoadingAi(false);
-  };
+  const updateOrderStatus = useCallback((id: string, status: OrderStatus) => {
+    setOrders(prev => prev.map(o => o.id === id ? {...o, status} : o));
+    addActivity('STATUS', `Pedido ${id} -> ${status}`);
+    showToast(`Status: ${status}`);
+  }, [addActivity, showToast]);
 
-  if (isAuthLoading) return (
-    <div className="min-h-screen bg-[#050505] flex items-center justify-center">
-      <div className="w-12 h-12 border-4 border-[#c4a661]/10 border-t-[#c4a661] rounded-full animate-spin" />
-    </div>
-  );
+  const handleSaveProduct = useCallback(() => {
+    if(!newProduct.name || !newProduct.price) return showToast("Campos obrigatórios vazios", "error");
+    if(isEditing) {
+      setProducts(p => p.map(it => it.id === isEditing ? {...newProduct as Product, id: isEditing} : it));
+      addActivity('INVENTORY', `Editado: ${newProduct.name}`);
+      setIsEditing(null);
+    } else {
+      const id = `p-${Date.now()}`;
+      setProducts(p => [...p, {...newProduct as Product, id}]);
+      addActivity('INVENTORY', `Criado: ${newProduct.name}`);
+    }
+    setNewProduct({name:'', price:0, description:'', category: 'Hambúrgueres', image:'', stock:100});
+    showToast("Cardápio atualizado");
+  }, [newProduct, isEditing, addActivity, showToast]);
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white selection:bg-[#c4a661] selection:text-black font-['Inter'] overflow-x-hidden">
-      
+    <div className="min-h-screen text-white/90 selection:bg-[#c4a661] selection:text-black">
+      {/* MESH BACKGROUND UTILITY */}
+      <div className="fixed inset-0 -z-10 bg-[#030303] overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-full opacity-20 bg-[radial-gradient(circle_at_50%_50%,#c4a661_0%,transparent_50%)]" />
+      </div>
+
       {/* TOAST SYSTEM */}
       {toast && (
-        <div className={`fixed top-24 right-6 z-[200] px-6 py-4 rounded-2xl shadow-2xl border backdrop-blur-xl animate-bounce-in flex items-center gap-3 ${toast.type === 'success' ? 'bg-green-500/10 border-green-500/20 text-green-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
-          <div className={`w-2 h-2 rounded-full ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} animate-pulse`} />
+        <div className={`fixed top-10 right-6 z-[600] px-8 py-5 rounded-2xl shadow-2xl border backdrop-blur-3xl animate-fade-up flex items-center gap-4 ${
+          toast.type === 'success' ? 'bg-green-500/10 border-green-500/20 text-green-400' : 
+          toast.type === 'alert' ? 'bg-[#c4a661]/20 border-[#c4a661]/40 text-[#c4a661]' : 'bg-red-500/10 border-red-500/20 text-red-400'
+        }`}>
+          <div className={`w-2 h-2 rounded-full ${toast.type === 'success' ? 'bg-green-500' : toast.type === 'alert' ? 'bg-[#c4a661]' : 'bg-red-500'} animate-pulse`} />
           <span className="text-[10px] font-black uppercase tracking-widest">{toast.msg}</span>
         </div>
       )}
 
       {/* NAVBAR */}
-      <nav className="sticky top-0 z-50 bg-[#050505]/95 backdrop-blur-xl border-b border-white/5">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex justify-between items-center">
-          <div className="flex items-center gap-4">
-            <div className="w-10 h-10 bg-[#c4a661] text-black rounded-xl flex items-center justify-center font-black text-xl shadow-lg shadow-[#c4a661]/20 group overflow-hidden">
-              {user ? <img src={user.photo} className="w-full h-full object-cover" /> : 'M'}
-            </div>
-            <div>
-              <h1 className="font-bebas text-2xl tracking-widest text-[#c4a661] leading-none uppercase">{config.storeName}</h1>
-              {user && <p className="text-[8px] uppercase font-bold tracking-widest text-white/30 mt-1">{user.name}</p>}
-            </div>
+      <nav className="sticky top-0 z-[100] h-20 px-6 md:px-12 flex justify-between items-center bg-[#030303]/80 backdrop-blur-xl border-b border-white/5">
+        <div className="flex items-center gap-4 cursor-pointer" onClick={() => window.scrollTo({top:0, behavior:'smooth'})}>
+          <div className="w-10 h-10 bg-white text-black rounded-xl flex items-center justify-center font-black text-xl">M</div>
+          <div className="hidden sm:block">
+            <h1 className="font-bebas text-2xl tracking-widest text-white leading-none">{config.storeName}</h1>
+            <p className="text-[8px] uppercase font-bold tracking-[0.3em] text-[#c4a661]">Miracema • RJ</p>
           </div>
-          <div className="flex items-center gap-6">
-            {user && <button onClick={handleLogout} className="text-[9px] font-black text-white/20 hover:text-red-500 uppercase tracking-widest transition-colors">Sair</button>}
-            {!isAdminMode && user && (
-              <button onClick={() => setShowAdminPinModal(true)} className="px-5 py-2 border border-white/10 rounded-full text-[9px] font-black uppercase text-white/30 hover:text-[#c4a661] transition-all hover:border-[#c4a661]/50">Gestão</button>
-            )}
-            {isAdminMode && (
-              <button onClick={() => setIsAdminMode(false)} className="px-5 py-2 bg-red-600 text-white rounded-full text-[9px] font-black uppercase shadow-lg shadow-red-600/20">Sair Admin</button>
-            )}
-          </div>
+        </div>
+        
+        <div className="flex items-center gap-4 md:gap-8">
+          {!isAdminMode ? (
+            <>
+              <button onClick={() => setShowHistoryModal(true)} className="text-[9px] font-black uppercase tracking-widest text-white/40 hover:text-white transition-colors">Histórico</button>
+              <button onClick={() => setShowAdminPinModal(true)} className="px-5 py-2 border border-white/10 rounded-full text-[9px] font-black uppercase tracking-widest text-white/40 hover:text-[#c4a661] hover:border-[#c4a661] transition-all">Gestão</button>
+              <button onClick={() => setShowCartDrawer(true)} className="flex items-center gap-3 bg-white text-black px-6 py-2.5 rounded-full hover:scale-105 transition-all shadow-lg shadow-white/5">
+                <span className="text-[9px] font-black uppercase tracking-widest">Sacola</span>
+                <span className="bg-black text-white px-2 py-0.5 rounded-md text-[9px] font-black">{cartCount}</span>
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setIsAdminMode(false)} className="bg-red-600 px-6 py-2.5 rounded-full text-[9px] font-black uppercase tracking-widest shadow-xl hover:bg-red-500 transition-colors">Sair do Painel</button>
+          )}
         </div>
       </nav>
 
-      {!user ? (
-        /* PORTAL DE ACESSO */
-        <div className="min-h-[90vh] flex items-center justify-center p-6 relative">
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-[#c4a661]/5 rounded-full blur-[120px] pointer-events-none" />
-          <div className="max-w-sm w-full bg-[#0a0a0a] border border-white/10 p-12 rounded-[4rem] space-y-10 animate-fade-in shadow-2xl relative z-10 glass">
-            <div className="text-center space-y-4">
-              <div className="w-20 h-20 bg-[#c4a661] text-black rounded-[2rem] flex items-center justify-center font-black text-4xl mx-auto shadow-2xl">M</div>
-              <h2 className="text-4xl font-bebas tracking-widest leading-none">MEME <span className="text-[#c4a661]">LANCHE</span></h2>
-              <p className="text-[9px] font-black text-white/20 uppercase tracking-[0.4em]">Elite Sales Terminal</p>
+      <main className="max-w-7xl mx-auto px-6 md:px-12 py-12 md:py-20">
+        {!isAdminMode ? (
+          <div className="space-y-24 animate-fade-up">
+            <header className="space-y-6">
+              <h2 className="text-6xl md:text-9xl font-bebas leading-[0.9] tracking-tighter">O SABOR DE <br/><span className="text-[#c4a661] italic">MIRACEMA.</span></h2>
+              <div className="flex flex-col md:flex-row md:items-center gap-6 md:gap-12">
+                <p className="text-white/40 font-medium max-w-md uppercase tracking-[0.2em] text-[10px] leading-relaxed">Ingredientes selecionados, preparo imediato e a tradição dos melhores lanches da região.</p>
+                {!config.isOpen && <div className="bg-red-600/20 border border-red-600/30 px-6 py-2 rounded-full text-red-500 text-[10px] font-black uppercase tracking-widest animate-pulse">Cozinha Fechada Agora</div>}
+              </div>
+            </header>
+
+            {/* FILTROS */}
+            <div className="flex gap-3 overflow-x-auto pb-6 no-scrollbar sticky top-20 z-50 bg-[#030303]/80 backdrop-blur-md pt-4">
+              {['Todos', 'Hambúrgueres', 'Especial', 'Acompanhamentos', 'Bebidas'].map(cat => (
+                <button 
+                  key={cat} 
+                  onClick={() => setActiveCategory(cat as any)} 
+                  className={`px-8 py-4 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all whitespace-nowrap ${
+                    activeCategory === cat ? 'bg-[#c4a661] border-[#c4a661] text-black shadow-lg shadow-[#c4a661]/10' : 'bg-white/5 border-white/5 text-white/30 hover:border-white/20'
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
             </div>
-            <form onSubmit={handleAuth} className="space-y-4">
-              {isRegistering && (
-                <div className="space-y-1 animate-fade-in">
-                  <label className="text-[8px] font-black text-gray-500 ml-4 uppercase">Nome Completo</label>
-                  <input required value={authName} onChange={e => setAuthName(e.target.value)} placeholder="JOÃO ELITE" className="w-full px-8 py-5 rounded-2xl text-[10px] font-black uppercase" />
+
+            {/* GRID DE PRODUTOS */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+              {filteredProducts.map(p => (
+                <div key={p.id} className="premium-card group rounded-[2.5rem] p-8 md:p-10 flex flex-col justify-between min-h-[340px] hover:scale-[1.02]">
+                  <div className="cursor-pointer" onClick={() => setSelectedProduct(p)}>
+                    <div className="flex justify-between items-start mb-6">
+                      <span className="text-[9px] font-black uppercase tracking-widest text-[#c4a661] border-b border-[#c4a661]/20 pb-1">{p.category}</span>
+                      <span className="text-3xl font-bebas text-[#c4a661] tracking-widest">{formatCurrency(p.price)}</span>
+                    </div>
+                    <h3 className="text-3xl font-bold uppercase tracking-tight text-white mb-6 group-hover:text-[#c4a661] transition-colors">{p.name}</h3>
+                    <div className="space-y-2">
+                       <p className="text-[9px] font-black uppercase text-white/20 tracking-widest">Composição:</p>
+                       <p className="text-sm text-white/60 leading-relaxed uppercase font-medium">{p.description}</p>
+                    </div>
+                  </div>
+                  <div className="mt-8">
+                    <button 
+                      onClick={() => {
+                        if(!config.isOpen) return showToast("Estamos fechados", "error");
+                        setCart(prev => {
+                          const ex = prev.find(i => i.product.id === p.id);
+                          if(ex) return prev.map(i => i.product.id === p.id ? {...i, quantity: i.quantity+1} : i);
+                          return [...prev, {product: p, quantity: 1}];
+                        });
+                        showToast(`${p.name} adicionado`);
+                      }} 
+                      className="w-full py-5 bg-white/5 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all"
+                    >
+                      Adicionar à Sacola
+                    </button>
+                  </div>
                 </div>
+              ))}
+              {filteredProducts.length === 0 && (
+                <div className="col-span-full py-32 text-center opacity-20 uppercase font-black text-sm tracking-[0.5em]">Nenhum item nesta categoria</div>
               )}
-              <div className="space-y-1">
-                <label className="text-[8px] font-black text-gray-500 ml-4 uppercase">E-mail</label>
-                <input required type="email" value={authEmail} onChange={e => setAuthEmail(e.target.value)} placeholder="EMAIL@EXEMPLO.COM" className="w-full px-8 py-5 rounded-2xl text-[10px] font-black uppercase" />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[8px] font-black text-gray-500 ml-4 uppercase">Senha de Acesso</label>
-                <input required type="password" value={authPass} onChange={e => setAuthPass(e.target.value)} placeholder="••••••••" className="w-full px-8 py-5 rounded-2xl text-[10px] font-black uppercase" />
-              </div>
-              <button type="submit" className="w-full bg-[#c4a661] text-black py-5 rounded-3xl font-black text-[11px] uppercase tracking-widest hover:scale-105 transition-transform shadow-xl shadow-[#c4a661]/10 mt-4">
-                {isRegistering ? 'CADASTRAR CONTA' : 'EFETUAR LOGIN'}
-              </button>
-            </form>
-            <button onClick={() => setIsRegistering(!isRegistering)} className="w-full text-[9px] font-black text-gray-600 uppercase tracking-widest hover:text-[#c4a661] transition-colors">
-              {isRegistering ? 'Já possui conta? Entrar' : 'Não tem conta? Criar Agora'}
-            </button>
+            </div>
           </div>
-        </div>
-      ) : (
-        /* ÁREA PRINCIPAL */
-        <main className="max-w-7xl mx-auto px-6 py-12">
-          {!isAdminMode ? (
-            /* VIEW DO CLIENTE */
-            <div className="space-y-16 animate-fade-in">
-              {activeOrder && (
-                <div className="bg-gradient-to-br from-white/[0.04] to-transparent border border-[#c4a661]/30 rounded-[3.5rem] p-10 md:p-14 space-y-12 relative overflow-hidden shadow-2xl glass">
-                   <div className="flex justify-between items-center">
-                    <div>
-                      <h3 className="text-4xl font-bebas tracking-widest leading-none">RASTREAMENTO EM TEMPO REAL</h3>
-                      <p className="text-[10px] font-black text-[#c4a661] uppercase tracking-[0.4em] mt-2">ORDEM {activeOrder.id} • {activeOrder.status}</p>
-                    </div>
-                    <div className="flex flex-col items-end">
-                      <div className="w-4 h-4 bg-[#c4a661] rounded-full animate-ping mb-1" />
-                      <span className="text-[8px] font-black text-white/20 uppercase">Syncing...</span>
-                    </div>
+        ) : (
+          /* PAINEL ADMIN */
+          <div className="space-y-16 animate-fade-up">
+            <header className="flex flex-col lg:flex-row justify-between lg:items-end gap-10">
+              <div className="space-y-2">
+                <h2 className="text-7xl font-bebas leading-none tracking-tighter italic">GESTOR <span className="text-[#c4a661] not-italic">CENTRAL</span></h2>
+                <div className="flex items-center gap-3">
+                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                  <p className="text-[9px] font-black uppercase tracking-widest text-white/30">Monitoramento Ativo • Miracema</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 md:gap-4 bg-white/5 p-2 rounded-[2rem] border border-white/5">
+                {[
+                  { id: 'resumo', label: 'Dashboard' },
+                  { id: 'pedidos', label: 'Vendas' },
+                  { id: 'cardapio', label: 'Menu' },
+                  { id: 'ajustes', label: 'Ajustes' },
+                  { id: 'logs', label: 'Logs' }
+                ].map(tab => (
+                  <button 
+                    key={tab.id} 
+                    onClick={() => setAdminTab(tab.id as any)} 
+                    className={`px-6 md:px-8 py-4 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all ${
+                      adminTab === tab.id ? 'bg-[#c4a661] text-black shadow-lg shadow-[#c4a661]/10' : 'text-white/40 hover:text-white'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </header>
+
+            <div className="premium-card rounded-[3rem] p-8 md:p-12 min-h-[500px]">
+              {adminTab === 'resumo' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+                   <div className="bg-white/5 p-10 rounded-[2.5rem] border border-white/5">
+                      <p className="text-[9px] font-black uppercase text-white/30 tracking-widest">Vendas de Hoje</p>
+                      <p className="text-5xl font-bebas text-[#c4a661] mt-4 italic">{formatCurrency(dailyRevenue)}</p>
                    </div>
-                   <div className="flex justify-between items-center relative px-4 md:px-12">
-                    <div className="absolute h-[2px] bg-white/5 top-1/2 left-0 right-0 mx-20" />
-                    {['Pendente', 'Preparando', 'Pronto', 'Enviado'].map((s, i) => {
-                      const isDone = ['Pendente', 'Preparando', 'Pronto', 'Enviado'].indexOf(activeOrder.status) >= i;
-                      const isActive = activeOrder.status === s;
-                      return (
-                        <div key={s} className="relative z-10 flex flex-col items-center gap-3">
-                          <div className={`w-14 h-14 rounded-[1.2rem] flex items-center justify-center transition-all duration-700 ${isDone ? 'bg-[#c4a661] text-black shadow-2xl shadow-[#c4a661]/40 scale-110' : 'bg-black border border-white/10 text-gray-700'}`}>
-                            <span className="text-sm font-black italic">{i+1}</span>
-                          </div>
-                          <span className={`text-[8px] font-black uppercase tracking-widest ${isActive ? 'text-[#c4a661]' : isDone ? 'text-white/60' : 'text-gray-800'}`}>{s}</span>
-                        </div>
-                      );
-                    })}
+                   <div className="bg-white/5 p-10 rounded-[2.5rem] border border-white/5">
+                      <p className="text-[9px] font-black uppercase text-white/30 tracking-widest">Pendentes</p>
+                      <p className="text-5xl font-bebas text-white mt-4 italic">{orders.filter(o => o.status === 'Pendente').length}</p>
+                   </div>
+                   <div className="bg-white/5 p-10 rounded-[2.5rem] border border-white/5">
+                      <p className="text-[9px] font-black uppercase text-white/30 tracking-widest">Itens Menu</p>
+                      <p className="text-5xl font-bebas text-white/50 mt-4 italic">{products.length}</p>
+                   </div>
+                   <div className="bg-white/5 p-10 rounded-[2.5rem] border border-white/5">
+                      <p className="text-[9px] font-black uppercase text-white/30 tracking-widest">Status Loja</p>
+                      <button 
+                        onClick={() => setConfig({...config, isOpen: !config.isOpen})}
+                        className={`mt-6 px-5 py-2 rounded-full text-[9px] font-black uppercase border tracking-widest transition-all ${
+                          config.isOpen ? 'border-green-500 text-green-500 hover:bg-green-500/10' : 'border-red-500 text-red-500 hover:bg-red-500/10'
+                        }`}
+                      >
+                        {config.isOpen ? 'ONLINE' : 'OFFLINE'}
+                      </button>
                    </div>
                 </div>
               )}
 
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-16">
-                <div className="lg:col-span-8 space-y-14">
-                  <div className="flex gap-4 overflow-x-auto pb-4 no-scrollbar">
-                    {['Todos', 'Hambúrgueres', 'Acompanhamentos', 'Bebidas', 'Sobremesas'].map(cat => (
-                      <button key={cat} onClick={() => setActiveCategory(cat as any)} className={`px-10 py-5 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all duration-500 whitespace-nowrap ${activeCategory === cat ? 'bg-[#c4a661] border-[#c4a661] text-black shadow-lg shadow-[#c4a661]/20' : 'bg-white/5 border-white/5 text-gray-500 hover:border-white/20'}`}>{cat}</button>
-                    ))}
+              {adminTab === 'pedidos' && (
+                <div className="space-y-10">
+                  <div className="relative">
+                    <input 
+                      value={searchSales} 
+                      onChange={e => setSearchSales(e.target.value)} 
+                      placeholder="PROCURAR POR NOME, ID OU DISPOSITIVO..." 
+                      className="w-full bg-black/40 px-10 py-6 rounded-2xl text-[10px] font-black uppercase tracking-widest border border-white/5" 
+                    />
+                    <span className="absolute right-8 top-1/2 -translate-y-1/2 opacity-20 text-xl font-light">🔍</span>
                   </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                    {products.filter(p => activeCategory === 'Todos' || p.category === activeCategory).map(p => (
-                      <div key={p.id} className="group bg-[#0a0a0a] border border-white/5 rounded-[3.5rem] overflow-hidden hover:border-[#c4a661]/40 transition-all duration-700 shadow-xl relative glass">
-                        <div className="h-72 relative overflow-hidden">
-                          <img src={p.image} className="w-full h-full object-cover grayscale opacity-80 group-hover:grayscale-0 group-hover:opacity-100 group-hover:scale-105 transition-all duration-1000" />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-60" />
-                          <div className="absolute bottom-8 left-8 bg-black/80 backdrop-blur-md px-5 py-2 rounded-full border border-white/10">
-                            <span className="text-[#c4a661] font-black text-xs tracking-widest italic">R$ {p.price.toFixed(2)}</span>
-                          </div>
-                        </div>
-                        <div className="p-10 space-y-5">
-                          <div>
-                            <h3 className="text-2xl font-bold uppercase tracking-tight group-hover:text-[#c4a661] transition-colors">{p.name}</h3>
-                            <p className="text-gray-500 text-[10px] leading-relaxed line-clamp-2 uppercase font-medium mt-2">{p.description}</p>
-                          </div>
-                          <button onClick={() => { 
-                            if(!config.isOpen) return showToast("Operação Encerrada!", "error");
-                            setCart(prev => {
-                              const ex = prev.find(i => i.product.id === p.id);
-                              if(ex) return prev.map(i => i.product.id === p.id ? {...i, quantity: i.quantity+1} : i);
-                              return [...prev, {product: p, quantity: 1}];
-                            });
-                            showToast(`${p.name} ADICIONADO!`);
-                          }} className="w-full py-5 bg-white/5 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-[#c4a661] hover:text-black transition-all duration-500">ADICIONAR À SACOLA</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="lg:col-span-4">
-                  <div className="bg-[#0a0a0a] border border-white/10 rounded-[4rem] p-10 sticky top-32 shadow-2xl glass">
-                    <h3 className="font-bebas text-5xl mb-10 tracking-widest text-[#c4a661] leading-none">MINHA <span className="text-white">SACOLA</span></h3>
-                    {cart.length === 0 ? (
-                      <div className="py-28 text-center flex flex-col items-center gap-6">
-                        <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center animate-pulse">
-                          <span className="text-4xl opacity-20">🛍️</span>
-                        </div>
-                        <p className="text-[10px] font-black text-gray-600 uppercase tracking-widest">Sua sacola está vazia</p>
-                      </div>
+                  <div className="space-y-6">
+                    {filteredOrders.length === 0 ? (
+                      <div className="text-center py-20 opacity-20 uppercase font-black text-[10px] tracking-[0.3em]">Sem registros correspondentes</div>
                     ) : (
-                      <form onSubmit={handleCheckout} className="space-y-8">
-                        <div className="space-y-4 max-h-[300px] overflow-y-auto no-scrollbar pr-2">
-                          {cart.map(i => (
-                            <div key={i.product.id} className="flex justify-between items-center bg-white/[0.03] p-5 rounded-3xl border border-white/5 group transition-all hover:bg-white/[0.06]">
-                              <div className="flex-1">
-                                <p className="text-[10px] font-black uppercase tracking-widest leading-none">{i.product.name}</p>
-                                <p className="text-[9px] text-[#c4a661] mt-2 font-bold tracking-widest italic">R$ {(i.product.price * i.quantity).toFixed(2)}</p>
-                              </div>
-                              <div className="flex items-center gap-4 bg-black/40 p-2 rounded-2xl border border-white/5">
-                                <button type="button" onClick={() => setCart(prev => prev.map(it => it.product.id === i.product.id ? {...it, quantity: Math.max(0, it.quantity-1)} : it).filter(it => it.quantity > 0))} className="w-8 h-8 rounded-xl bg-black border border-white/5 flex items-center justify-center text-xs font-black transition-colors hover:text-red-500">-</button>
-                                <span className="text-[11px] font-black min-w-[15px] text-center italic">{i.quantity}</span>
-                                <button type="button" onClick={() => setCart(prev => prev.map(it => it.product.id === i.product.id ? {...it, quantity: it.quantity+1} : it))} className="w-8 h-8 rounded-xl bg-black border border-white/5 flex items-center justify-center text-xs font-black transition-colors hover:text-green-500">+</button>
-                              </div>
+                      filteredOrders.map(o => (
+                        <div key={o.id} className={`p-8 rounded-[2.5rem] border flex flex-col md:flex-row justify-between items-center gap-8 transition-all ${o.status === 'Pendente' ? 'bg-[#c4a661]/5 border-[#c4a661]/20' : 'bg-white/[0.02] border-white/5'}`}>
+                          <div className="flex-1 space-y-3">
+                            <div className="flex items-center gap-4">
+                              <span className="text-[#c4a661] font-black text-lg italic tracking-widest">{o.id}</span>
+                              <span className="text-[8px] text-white/20 uppercase font-black tracking-widest">{new Date(o.createdAt).toLocaleString('pt-BR')}</span>
+                              <span className="text-[7px] text-white/10 uppercase font-black">ID DISP: {o.deviceId.slice(-6)}</span>
                             </div>
-                          ))}
+                            <h4 className="text-3xl font-bold uppercase truncate max-w-[300px]">{o.customerName}</h4>
+                            <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-medium">{o.customerPhone}</p>
+                          </div>
+                          <div className="flex flex-col md:items-end gap-6 min-w-[300px]">
+                            <select 
+                              value={o.status} 
+                              onChange={e => updateOrderStatus(o.id, e.target.value as OrderStatus)} 
+                              className="w-full bg-black border border-white/10 px-8 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest appearance-none"
+                            >
+                              {['Pendente', 'Preparando', 'Pronto', 'Enviado', 'Cancelado'].map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                            <div className="flex items-center justify-between w-full">
+                              <button onClick={() => setViewingOrder(o)} className="text-[9px] font-black uppercase text-[#c4a661] hover:underline">Detalhes</button>
+                              <p className="text-4xl font-bebas text-[#c4a661] italic">{formatCurrency(o.total)}</p>
+                            </div>
+                          </div>
                         </div>
-                        
-                        <div className="pt-8 border-t border-white/10 space-y-2">
-                           <div className="flex justify-between items-center opacity-40">
-                             <span className="text-[9px] font-black uppercase">Taxa de Entrega</span>
-                             <span className="text-[10px] font-black">R$ {config.deliveryFee.toFixed(2)}</span>
-                           </div>
-                           <div className="flex justify-between items-end pt-2">
-                             <span className="text-[11px] font-black uppercase text-gray-600">Total Elite</span>
-                             <span className="text-6xl font-bebas text-[#c4a661] leading-none tracking-tighter">R$ {(cartTotal + config.deliveryFee).toFixed(2)}</span>
-                           </div>
-                        </div>
-
-                        <div className="space-y-4 pt-4">
-                          <input required name="phone" placeholder="WHATSAPP (DDD)" className="w-full px-8 py-5 rounded-2xl text-[10px] font-black uppercase tracking-widest" />
-                          <textarea required name="address" placeholder="ENDEREÇO COMPLETO + REFERÊNCIA" className="w-full px-8 py-5 rounded-2xl text-[10px] font-black uppercase h-28 resize-none tracking-widest" />
-                          <select name="payment" className="w-full px-8 py-5 rounded-2xl text-[10px] font-black uppercase bg-[#050505] tracking-widest">
-                            <option value="PIX (na Entrega)">PIX (NO RECEBIMENTO)</option>
-                            <option value="Cartão (Máquina)">CARTÃO (MÁQUINA)</option>
-                            <option value="Dinheiro">DINHEIRO ESPÉCIE</option>
-                          </select>
-                        </div>
-
-                        <button disabled={isProcessingOrder} className="w-full bg-[#c4a661] text-black py-7 rounded-[2.5rem] font-black text-xs uppercase tracking-[0.3em] shadow-2xl shadow-[#c4a661]/10 hover:scale-[1.03] transition-all disabled:opacity-50">
-                          {isProcessingOrder ? 'PROCESSANDO...' : 'FINALIZAR NO WHATSAPP'}
-                        </button>
-                      </form>
+                      ))
                     )}
                   </div>
                 </div>
-              </div>
-            </div>
-          ) : (
-            /* VIEW DO ADMINISTRADOR (PIN 777) */
-            <div className="space-y-12 animate-fade-in">
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-10">
-                <div>
-                  <h2 className="text-8xl font-bebas tracking-widest leading-none">TERMINAL <span className="text-[#c4a661]">CORE</span></h2>
-                  <p className="text-gray-500 text-[11px] font-black uppercase tracking-[0.6em] mt-3">Meme Lanche Operation Control</p>
+              )}
+
+              {adminTab === 'cardapio' && (
+                <div className="space-y-16">
+                  <div className="bg-white/[0.02] p-8 md:p-12 rounded-[3rem] border border-[#c4a661]/10 space-y-8">
+                    <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-[#c4a661]">{isEditing ? 'EDITANDO PRODUTO' : 'ADICIONAR NOVO ITEM'}</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                       <input value={newProduct.name} onChange={e => setNewProduct({...newProduct, name: e.target.value})} placeholder="NOME DO LANCHE" className="bg-black/60 px-8 py-5 rounded-xl text-[10px] font-black uppercase border border-white/5" />
+                       <input type="number" value={newProduct.price || ''} onChange={e => setNewProduct({...newProduct, price: Number(e.target.value)})} placeholder="PREÇO (R$)" className="bg-black/60 px-8 py-5 rounded-xl text-[10px] font-black uppercase border border-white/5" />
+                       <select value={newProduct.category} onChange={e => setNewProduct({...newProduct, category: e.target.value as Category})} className="bg-black/60 px-8 py-5 rounded-xl text-[10px] font-black uppercase border border-white/5">
+                         {['Hambúrgueres', 'Especial', 'Acompanhamentos', 'Bebidas', 'Sobremesas'].map(c => <option key={c} value={c}>{c}</option>)}
+                       </select>
+                    </div>
+                    <textarea value={newProduct.description} onChange={e => setNewProduct({...newProduct, description: e.target.value})} placeholder="DESCREVA OS INGREDIENTES..." className="w-full bg-black/60 px-8 py-6 rounded-xl text-[10px] font-black uppercase h-28 border border-white/5 resize-none" />
+                    <div className="flex gap-4">
+                      <button onClick={handleSaveProduct} className="flex-1 md:flex-none bg-[#c4a661] text-black px-12 py-5 rounded-2xl font-black text-[10px] uppercase shadow-xl hover:scale-105 transition-all">{isEditing ? 'Salvar Alterações' : 'Confirmar Cadastro'}</button>
+                      {isEditing && <button onClick={() => {setIsEditing(null); setNewProduct({name:'', price:0, description:'', category: 'Hambúrgueres', image:'', stock:100});}} className="px-8 py-5 text-[9px] font-black uppercase text-white/30 hover:text-white">Cancelar</button>}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {products.map(p => (
+                      <div key={p.id} className="bg-white/[0.01] border border-white/5 p-8 rounded-[2rem] group hover:border-[#c4a661]/20 transition-all flex justify-between items-center">
+                        <div className="flex-1 overflow-hidden">
+                          <h4 className="text-xl font-bold uppercase truncate">{p.name}</h4>
+                          <p className="text-2xl font-bebas text-[#c4a661] italic mt-1">{formatCurrency(p.price)}</p>
+                        </div>
+                        <div className="flex gap-3 ml-6">
+                           <button onClick={() => {setIsEditing(p.id); setNewProduct(p); window.scrollTo({top: 0, behavior: 'smooth'});}} className="w-10 h-10 rounded-xl bg-white text-black flex items-center justify-center text-sm hover:rotate-12 transition-transform shadow-lg shadow-white/5">✎</button>
+                           <button onClick={() => {if(confirm(`Excluir ${p.name}?`)) { setProducts(ps => ps.filter(it => it.id !== p.id)); addActivity('INVENTORY', `Excluído: ${p.name}`); }}} className="w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center text-lg font-black hover:scale-110 transition-transform shadow-lg shadow-red-600/10">×</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex gap-4 overflow-x-auto w-full md:w-auto pb-4 no-scrollbar">
-                  {['dashboard', 'sales', 'inventory', 'settings'].map(tab => (
-                    <button key={tab} onClick={() => setAdminTab(tab as any)} className={`px-10 py-5 rounded-[1.5rem] text-[10px] font-black uppercase tracking-[0.2em] border transition-all whitespace-nowrap ${adminTab === tab ? 'bg-[#c4a661] border-[#c4a661] text-black shadow-xl shadow-[#c4a661]/20' : 'bg-white/5 border-white/10 text-gray-500 hover:border-white/20'}`}>{tab}</button>
+              )}
+
+              {adminTab === 'ajustes' && (
+                <div className="max-w-2xl space-y-12">
+                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
+                     <div className="space-y-3">
+                       <label className="text-[9px] font-black uppercase text-white/20 tracking-widest ml-4">Taxa de Entrega</label>
+                       <input type="number" value={config.deliveryFee} onChange={e => setConfig({...config, deliveryFee: Number(e.target.value)})} className="w-full bg-black/40 px-8 py-5 rounded-xl text-lg font-black italic border border-white/5" />
+                     </div>
+                     <div className="space-y-3">
+                       <label className="text-[9px] font-black uppercase text-white/20 tracking-widest ml-4">PIN Gestor</label>
+                       <input value={config.adminKey} onChange={e => setConfig({...config, adminKey: e.target.value})} className="w-full bg-black/40 px-8 py-5 rounded-xl text-lg font-black italic text-center border border-white/5" />
+                     </div>
+                   </div>
+                   <div className="space-y-3">
+                      <label className="text-[9px] font-black uppercase text-white/20 tracking-widest ml-4">WhatsApp de Recebimento</label>
+                      <input value={config.whatsappNumber} onChange={e => setConfig({...config, whatsappNumber: e.target.value})} className="w-full bg-black/40 px-8 py-5 rounded-xl text-lg font-black italic border border-white/5" />
+                   </div>
+                   <div className="p-8 bg-[#c4a661]/5 border border-[#c4a661]/10 rounded-3xl">
+                      <p className="text-[9px] font-black uppercase text-[#c4a661] tracking-widest mb-4">Informação de Segurança</p>
+                      <p className="text-xs text-white/40 leading-relaxed uppercase font-medium">O identificador deste terminal é: <span className="text-white font-black">{deviceId.slice(-6).toUpperCase()}</span>. Os dados são persistidos localmente no navegador.</p>
+                   </div>
+                </div>
+              )}
+
+              {adminTab === 'logs' && (
+                <div className="space-y-3 max-h-[500px] overflow-y-auto pr-4 no-scrollbar">
+                  {activities.map(act => (
+                    <div key={act.id} className="bg-white/[0.02] border border-white/5 p-6 rounded-2xl flex justify-between items-center hover:bg-white/[0.04] transition-colors">
+                       <p className="text-[10px] font-bold uppercase text-white/70">{act.message}</p>
+                       <span className="text-[8px] text-white/20 font-black uppercase italic">{new Date(act.timestamp).toLocaleTimeString('pt-BR')}</span>
+                    </div>
                   ))}
                 </div>
-              </div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
 
-              <div className="bg-[#0a0a0a] border border-white/5 rounded-[4.5rem] p-12 min-h-[650px] shadow-2xl relative overflow-hidden glass">
-                
-                {/* ADMIN DASHBOARD + CFO IA */}
-                {adminTab === 'dashboard' && (
-                  <div className="space-y-14">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
-                      <div className="bg-white/5 p-14 rounded-[3.5rem] border border-white/5 flex flex-col justify-between">
-                        <span className="text-gray-500 text-[11px] font-black uppercase tracking-[0.3em]">Revenue Pipeline</span>
-                        <p className="text-8xl font-bebas text-[#c4a661] mt-6 leading-none tracking-tighter">R$ {orders.reduce((a,c) => a+c.total, 0).toFixed(2)}</p>
-                      </div>
-                      <div className="bg-white/5 p-14 rounded-[3.5rem] border border-white/5 flex flex-col justify-between">
-                        <span className="text-gray-500 text-[11px] font-black uppercase tracking-[0.3em]">Total Orders</span>
-                        <p className="text-8xl font-bebas mt-6 leading-none italic">{orders.length}</p>
-                      </div>
-                      <div className="bg-white/5 p-14 rounded-[3.5rem] border border-[#c4a661]/30 flex flex-col justify-between items-start">
-                        <span className="text-gray-500 text-[11px] font-black uppercase tracking-[0.3em]">IA Strategy Analyst</span>
-                        <button onClick={handleAiAdvice} disabled={isLoadingAi} className="mt-10 w-full py-5 bg-[#c4a661] text-black rounded-2xl font-black text-[10px] uppercase tracking-[0.2em] hover:scale-105 transition-transform shadow-xl shadow-[#c4a661]/20 disabled:opacity-50">
-                          {isLoadingAi ? 'CALCULANDO...' : 'REQUISITAR INSIGHT CFO'}
-                        </button>
-                      </div>
+      {/* MODAL DETALHES PEDIDO */}
+      {viewingOrder && (
+        <div className="fixed inset-0 z-[500] flex items-center justify-center bg-black/95 backdrop-blur-xl px-4 md:px-6">
+           <div className="max-w-3xl w-full bg-[#050505] border border-white/10 rounded-[3.5rem] p-10 md:p-16 animate-fade-up relative shadow-2xl overflow-y-auto max-h-[90vh] no-scrollbar">
+              <button onClick={() => setViewingOrder(null)} className="absolute top-10 right-10 text-white/30 text-4xl font-light hover:text-white transition-colors">×</button>
+              <div className="space-y-12">
+                 <div className="flex flex-col sm:flex-row justify-between sm:items-end border-b border-white/5 pb-10 gap-6">
+                    <div>
+                      <span className="text-[#c4a661] font-black italic text-sm tracking-[0.4em] uppercase">ID COMPRA: {viewingOrder.id}</span>
+                      <h2 className="text-5xl font-bebas text-white uppercase mt-2">{viewingOrder.customerName}</h2>
+                      <p className="text-white/40 text-[10px] font-black uppercase tracking-widest">{viewingOrder.customerPhone}</p>
                     </div>
-                    
-                    {aiAdvice && (
-                      <div className="bg-[#c4a661]/5 border border-[#c4a661]/20 p-12 rounded-[3.5rem] animate-fade-in relative">
-                        <div className="absolute top-8 right-8 text-[#c4a661]/20 text-6xl font-bebas italic">GEMINI 3 PRO</div>
-                        <h4 className="text-[#c4a661] font-black text-xs uppercase tracking-[0.3em] mb-8 flex items-center gap-4">
-                          <div className="w-3 h-3 rounded-full bg-[#c4a661] animate-pulse" />
-                          Relatório Estratégico de Performance
-                        </h4>
-                        <div className="text-[13px] leading-loose text-gray-300 whitespace-pre-wrap font-medium max-w-4xl tracking-wide">{aiAdvice}</div>
-                      </div>
-                    )}
-                  </div>
-                )}
+                    <div className="text-left sm:text-right">
+                       <p className="text-6xl font-bebas text-[#c4a661] leading-none italic tracking-widest">{formatCurrency(viewingOrder.total)}</p>
+                    </div>
+                 </div>
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-12 text-[10px] font-medium uppercase text-white/60 tracking-wider">
+                    <div className="space-y-6">
+                       <h3 className="text-[#c4a661] font-black tracking-[0.4em] text-[9px]">RESUMO DOS ITENS</h3>
+                       <div className="space-y-4">
+                        {viewingOrder.items.map((i, idx) => (
+                          <div key={idx} className="flex justify-between border-b border-white/5 pb-3">
+                            <span>{i.quantity}x {i.product.name}</span>
+                            <span className="text-white font-black">{formatCurrency(i.product.price * i.quantity)}</span>
+                          </div>
+                        ))}
+                       </div>
+                    </div>
+                    <div className="space-y-6">
+                       <h3 className="text-[#c4a661] font-black tracking-[0.4em] text-[9px]">LOGÍSTICA E PAGAMENTO</h3>
+                       <div className="space-y-4">
+                         <div className="bg-white/5 p-4 rounded-xl">
+                           <p className="text-white/20 block mb-1 uppercase text-[8px]">Endereço:</p> 
+                           <p className="text-white/80">{viewingOrder.address}</p>
+                         </div>
+                         <div className="flex justify-between">
+                            <span className="text-white/20">Pagamento:</span>
+                            <span className="text-white">{viewingOrder.paymentMethod}</span>
+                         </div>
+                         <div className="flex justify-between">
+                            <span className="text-white/20">Dispositivo Identificado:</span>
+                            <span className="text-white font-black">{viewingOrder.deviceId.slice(-8).toUpperCase()}</span>
+                         </div>
+                       </div>
+                    </div>
+                 </div>
+              </div>
+           </div>
+        </div>
+      )}
 
-                {/* ADMIN VENDAS */}
-                {adminTab === 'sales' && (
-                  <div className="space-y-8">
-                    {orders.sort((a,b) => b.createdAt - a.createdAt).map(o => (
-                      <div key={o.id} className="bg-white/[0.03] p-12 rounded-[4rem] border border-white/5 flex flex-col md:flex-row justify-between gap-12 transition-all hover:bg-white/[0.05] hover:border-white/10 group">
-                        <div className="space-y-6 flex-1">
-                          <div className="flex gap-6 items-center">
-                            <span className="text-[#c4a661] font-black text-sm tracking-[0.3em] italic">{o.id}</span>
-                            <div className="px-6 py-2 rounded-full bg-white/5 border border-white/10">
-                              <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest">{new Date(o.createdAt).toLocaleString('pt-BR')}</span>
-                            </div>
-                          </div>
-                          <h4 className="text-4xl font-bold uppercase tracking-tighter group-hover:text-[#c4a661] transition-colors">{o.customerName}</h4>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 text-[11px] font-medium tracking-wide">
-                            <div className="space-y-2">
-                              <p className="text-gray-600 font-black uppercase text-[9px] tracking-[0.3em]">Dados de Contato:</p>
-                              <p>{o.customerPhone}</p>
-                              <p>{o.customerEmail}</p>
-                            </div>
-                            <div className="space-y-2">
-                              <p className="text-gray-600 font-black uppercase text-[9px] tracking-[0.3em]">Local de Entrega:</p>
-                              <p className="line-clamp-2 uppercase">{o.address}</p>
-                            </div>
-                          </div>
-                          <div className="bg-black/80 p-8 rounded-[2rem] border border-white/5">
-                             <p className="text-[9px] text-gray-600 uppercase font-black tracking-[0.3em] mb-5">Bill of Materials (BOM):</p>
-                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                               {o.items.map(i => (
-                                 <div key={i.product.id} className="flex justify-between items-center border-b border-white/5 pb-2">
-                                   <span className="text-[11px] font-black uppercase tracking-tight">{i.quantity}x {i.product.name}</span>
-                                   <span className="text-[9px] text-[#c4a661] italic font-bold">R$ {(i.product.price * i.quantity).toFixed(2)}</span>
-                                 </div>
-                               ))}
-                             </div>
-                          </div>
+      {/* MODAL PRODUTO DETALHE */}
+      {selectedProduct && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/95 backdrop-blur-xl px-4">
+           <div className="max-w-2xl w-full bg-[#050505] border border-white/10 rounded-[3.5rem] p-10 md:p-16 flex flex-col space-y-10 animate-fade-up relative shadow-2xl">
+              <button onClick={() => setSelectedProduct(null)} className="absolute top-8 right-8 w-12 h-12 bg-white/5 rounded-full flex items-center justify-center text-3xl font-light hover:bg-white hover:text-black transition-all">×</button>
+              <div className="space-y-6">
+                <span className="text-[#c4a661] font-black text-[10px] uppercase tracking-[0.4em] italic">{selectedProduct.category}</span>
+                <h2 className="text-6xl md:text-8xl font-bebas leading-none tracking-tight">{selectedProduct.name}</h2>
+                <div className="pt-6 border-t border-white/10">
+                   <p className="text-[9px] font-black uppercase text-white/20 tracking-widest mb-4">Composição:</p>
+                   <p className="text-white/70 text-xl md:text-2xl leading-relaxed uppercase font-medium">{selectedProduct.description}</p>
+                </div>
+              </div>
+              <div className="flex flex-col md:flex-row md:items-end justify-between border-t border-white/10 pt-10 gap-8">
+                <p className="text-7xl font-bebas text-[#c4a661] italic leading-none">{formatCurrency(selectedProduct.price)}</p>
+                <button 
+                  onClick={() => {
+                   if(!config.isOpen) return showToast("Cozinha indisponível", "error");
+                   setCart(prev => {
+                     const ex = prev.find(i => i.product.id === selectedProduct.id);
+                     if(ex) return prev.map(i => i.product.id === selectedProduct.id ? {...i, quantity: i.quantity+1} : i);
+                     return [...prev, {product: selectedProduct, quantity: 1}];
+                   });
+                   showToast("Adicionado!");
+                   setSelectedProduct(null);
+                  }} 
+                  className="bg-white text-black px-12 py-6 rounded-full font-black text-[11px] uppercase shadow-2xl hover:scale-105 active:scale-95 transition-all tracking-widest"
+                >
+                  Confirmar e Pedir
+                </button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {/* DRAWER SACOLA */}
+      {showCartDrawer && (
+        <div className="fixed inset-0 z-[300] flex justify-end">
+           <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowCartDrawer(false)} />
+           <div className="relative w-full max-w-xl bg-[#050505] border-l border-white/10 p-8 md:p-12 flex flex-col animate-slide-left h-screen overflow-y-auto no-scrollbar">
+              <div className="flex justify-between items-center mb-10">
+                <h3 className="font-bebas text-5xl tracking-widest text-[#c4a661]">MINHA <span className="text-white">SACOLA</span></h3>
+                <button onClick={() => setShowCartDrawer(false)} className="text-white/30 hover:text-white text-4xl font-light">×</button>
+              </div>
+              
+              {cart.length === 0 ? (
+                <div className="flex-1 flex flex-col items-center justify-center opacity-10 space-y-6">
+                  <span className="text-8xl">🧺</span>
+                  <p className="text-[10px] font-black uppercase tracking-[0.4em]">Sua sacola está vazia</p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex-1 space-y-6">
+                    {cart.map(i => (
+                      <div key={i.product.id} className="bg-white/[0.03] p-6 rounded-2xl border border-white/5 flex gap-6 items-center">
+                        <div className="flex-1">
+                          <h4 className="text-lg font-bold uppercase truncate">{i.product.name}</h4>
+                          <p className="text-[#c4a661] font-bold text-xs italic">{formatCurrency(i.product.price * i.quantity)}</p>
                         </div>
-                        <div className="flex flex-col items-end justify-between min-w-[300px] gap-8">
-                           <div className="w-full space-y-3">
-                             <label className="text-[9px] font-black text-gray-600 uppercase tracking-widest ml-4">Current Status</label>
-                             <select value={o.status} onChange={e => { setOrders(prev => prev.map(ord => ord.id === o.id ? {...ord, status: e.target.value as OrderStatus} : ord)); showToast(`Status ${o.id} Updated`); }} className="w-full bg-black border border-white/10 px-8 py-5 rounded-2xl text-[11px] font-black uppercase tracking-[0.2em] outline-none focus:border-[#c4a661] transition-all cursor-pointer">
-                                <option value="Pendente">Aguardando Aprovação</option>
-                                <option value="Preparando">In Production (Cozinha)</option>
-                                <option value="Pronto">Order Finished (Packaged)</option>
-                                <option value="Enviado">En Route (Delivery)</option>
-                                <option value="Cancelado">Terminated (Canceled)</option>
-                             </select>
-                           </div>
-                           <div className="text-right">
-                             <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">Final Invoice Total</p>
-                             <p className="text-7xl font-bebas text-[#c4a661] leading-none tracking-tighter italic">R$ {o.total.toFixed(2)}</p>
-                           </div>
+                        <div className="flex items-center gap-4 bg-black/60 p-2 rounded-xl border border-white/5">
+                          <button onClick={() => setCart(prev => prev.map(it => it.product.id === i.product.id ? {...it, quantity: Math.max(0, it.quantity-1)} : it).filter(it => it.quantity > 0))} className="w-8 h-8 rounded-lg border border-white/10 text-white hover:bg-white hover:text-black transition-all">-</button>
+                          <span className="text-sm font-black w-4 text-center">{i.quantity}</span>
+                          <button onClick={() => setCart(prev => prev.map(it => it.product.id === i.product.id ? {...it, quantity: it.quantity+1} : it))} className="w-8 h-8 rounded-lg border border-white/10 text-white hover:bg-white hover:text-black transition-all">+</button>
                         </div>
                       </div>
                     ))}
-                    {orders.length === 0 && <div className="py-52 text-center opacity-10 text-[12px] font-black uppercase tracking-[0.8em]">Operational Database Empty</div>}
                   </div>
-                )}
 
-                {/* ADMIN INVENTÁRIO */}
-                {adminTab === 'inventory' && (
-                  <div className="space-y-16">
-                     <div className="bg-white/[0.03] p-14 rounded-[4.5rem] border border-[#c4a661]/20 space-y-12">
-                      <h3 className="text-xs font-black uppercase tracking-[0.5em] text-[#c4a661]">Master Inventory Creation</h3>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black uppercase text-gray-600 ml-5 tracking-widest">Product Label</label>
-                           <input value={newProduct.name} onChange={e => setNewProduct({...newProduct, name: e.target.value})} placeholder="EX: MEME MONSTER BURGER" className="w-full px-10 py-6 rounded-3xl text-[11px] font-black uppercase tracking-wider" />
-                        </div>
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black uppercase text-gray-600 ml-5 tracking-widest">Unit Price (BRL)</label>
-                           <input type="number" value={newProduct.price || ''} onChange={e => setNewProduct({...newProduct, price: Number(e.target.value)})} placeholder="EX: 55.00" className="w-full px-10 py-6 rounded-3xl text-[11px] font-black uppercase tracking-wider" />
-                        </div>
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black uppercase text-gray-600 ml-5 tracking-widest">Category Cluster</label>
-                           <select value={newProduct.category} onChange={e => setNewProduct({...newProduct, category: e.target.value as Category})} className="w-full px-10 py-6 rounded-3xl text-[11px] font-black uppercase bg-[#050505] tracking-widest cursor-pointer">
-                            <option value="Hambúrgueres">HAMBÚRGUERES</option>
-                            <option value="Acompanhamentos">ACOMPANHAMENTOS</option>
-                            <option value="Bebidas">BEBIDAS</option>
-                            <option value="Sobremesas">SOBREMESAS</option>
-                           </select>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                         <label className="text-[10px] font-black uppercase text-gray-600 ml-5 tracking-widest">Media Source (Direct URL)</label>
-                         <input value={newProduct.image} onChange={e => setNewProduct({...newProduct, image: e.target.value})} placeholder="HTTPS://IMAGES.UNSPLASH.COM/..." className="w-full px-10 py-6 rounded-3xl text-[11px] font-black uppercase tracking-wider" />
-                      </div>
-                      <button onClick={() => { 
-                        if(!newProduct.name || !newProduct.price || !newProduct.image) return showToast("Faltam dados obrigatórios!", "error"); 
-                        setProducts(prev => [...prev, {...newProduct as Product, id: `p-${Date.now()}`}]); 
-                        setNewProduct({name:'', price:0, description:'', category:'Hambúrgueres', image:'', stock:100}); 
-                        showToast("PRODUTO INTEGRADO AO DATABASE!"); 
-                      }} className="px-16 py-6 bg-[#c4a661] text-black rounded-3xl font-black text-xs uppercase tracking-[0.4em] shadow-2xl shadow-[#c4a661]/20 hover:scale-[1.05] transition-transform">
-                        DEPLOY TO MASTER MENU
-                      </button>
+                  <form onSubmit={handleCheckout} className="mt-10 space-y-4 border-t border-white/10 pt-8">
+                    <div className="flex justify-between items-end mb-6">
+                       <span className="text-[10px] font-black uppercase text-white/30 tracking-widest italic">Total Final</span>
+                       <span className="text-6xl font-bebas text-[#c4a661] leading-none italic">{formatCurrency(cartTotal + config.deliveryFee)}</span>
                     </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-10">
-                      {products.map(p => (
-                        <div key={p.id} className="bg-white/[0.03] p-8 rounded-[3.5rem] flex gap-8 items-center group relative border border-white/5 hover:border-red-600/40 transition-all duration-500">
-                           <button onClick={() => { if(confirm("Confirmar deleção do item?")) setProducts(prev => prev.filter(it => it.id !== p.id)); }} className="absolute top-8 right-8 w-10 h-10 rounded-full bg-red-600/10 text-red-600 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all font-black text-xl">×</button>
-                           <div className="w-28 h-28 rounded-[2rem] overflow-hidden flex-shrink-0 shadow-xl">
-                            <img src={p.image} className="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all duration-700" />
-                           </div>
-                           <div className="flex-1 space-y-2">
-                             <h4 className="text-xl font-bold uppercase tracking-tight group-hover:text-[#c4a661] transition-colors">{p.name}</h4>
-                             <p className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em]">{p.category}</p>
-                             <p className="text-2xl font-bebas text-white italic">R$ {p.price.toFixed(2)}</p>
-                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* ADMIN CONFIGURAÇÕES */}
-                {adminTab === 'settings' && (
-                  <div className="max-w-3xl space-y-14">
-                     <div className="space-y-4">
-                       <label className="text-[10px] font-black uppercase text-[#c4a661] ml-6 tracking-[0.3em]">Operational Status Control</label>
-                       <button onClick={() => setConfig({...config, isOpen: !config.isOpen})} className={`w-full py-12 rounded-[3.5rem] font-black text-sm uppercase tracking-[0.6em] border transition-all duration-700 ${config.isOpen ? 'border-green-600/30 text-green-500 bg-green-600/[0.05] shadow-lg shadow-green-600/10' : 'border-red-600/30 text-red-500 bg-red-600/[0.05] shadow-lg shadow-red-600/10'}`}>
-                        {config.isOpen ? 'LOJA ONLINE (PROCESSANDO VENDAS)' : 'LOJA OFFLINE (SISTEMA BLOQUEADO)'}
-                      </button>
-                     </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-                      <div className="space-y-4">
-                        <label className="text-[11px] font-black uppercase text-[#c4a661] ml-6 tracking-[0.3em]">Delivery Fee Master</label>
-                        <input type="number" value={config.deliveryFee} onChange={e => setConfig({...config, deliveryFee: Number(e.target.value)})} className="w-full px-10 py-7 rounded-[2rem] bg-white/5 border border-white/10 text-sm font-black italic" />
+                    
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <input required name="name" placeholder="NOME" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
+                        <input required name="phone" value={phoneInput} onChange={handlePhoneChange} placeholder="WHATSAPP" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
                       </div>
-                      <div className="space-y-4">
-                        <label className="text-[11px] font-black uppercase text-[#c4a661] ml-6 tracking-[0.3em]">Central WhatsApp Hub</label>
-                        <input value={config.whatsappNumber} onChange={e => setConfig({...config, whatsappNumber: e.target.value})} className="w-full px-10 py-7 rounded-[2rem] bg-white/5 border border-white/10 text-sm font-black italic" />
+                      <div className="grid grid-cols-4 gap-3">
+                        <input required name="rua" placeholder="RUA / LOGRADOURO" className="col-span-3 px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
+                        <input required name="numero" placeholder="Nº" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <input required name="bairro" placeholder="BAIRRO" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
+                        <input name="referencia" placeholder="REFERÊNCIA" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <input required type="email" name="email" defaultValue={lastOrderEmail} placeholder="EMAIL" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black/40 border border-white/5" />
+                        <select name="payment" className="px-6 py-4 rounded-xl text-[10px] font-black uppercase bg-black border border-white/5 appearance-none">
+                          <option value="PIX (na Entrega)">PIX NA ENTREGA</option>
+                          <option value="Cartão (Máquina)">CARTÃO (MÁQUINA)</option>
+                          <option value="Dinheiro">DINHEIRO</option>
+                        </select>
                       </div>
                     </div>
 
-                    <div className="space-y-4 pt-6">
-                        <label className="text-[11px] font-black uppercase text-[#c4a661] ml-6 tracking-[0.3em]">Formspree Key (Protocol: HTTPS)</label>
-                        <div className="relative">
-                          <input value={config.formspreeId} onChange={e => setConfig({...config, formspreeId: e.target.value})} className="w-full px-10 py-7 rounded-[2rem] bg-white/5 border border-white/10 text-sm font-black italic" />
-                          <div className="absolute right-10 top-1/2 -translate-y-1/2 flex items-center gap-3">
-                            <span className="text-[10px] font-black text-white/20 uppercase">Secure Gateway</span>
-                            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                          </div>
-                        </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </main>
+                    <p className="text-[8px] text-white/20 uppercase text-center mt-2 tracking-widest">Identificação segura ativa via dispositivo: {deviceId.slice(-6).toUpperCase()}</p>
+
+                    <button disabled={isProcessingOrder} className="w-full bg-[#c4a661] text-black py-6 rounded-2xl font-black text-xs uppercase tracking-[0.3em] shadow-xl hover:scale-[1.02] active:scale-95 transition-all">
+                      {isProcessingOrder ? 'GERANDO PEDIDO...' : 'FINALIZAR NO WHATSAPP'}
+                    </button>
+                  </form>
+                </>
+              )}
+           </div>
+        </div>
       )}
 
-      {/* MODAL PIN GESTOR */}
+      {/* LOGIN PIN MODAL */}
       {showAdminPinModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/98 backdrop-blur-[100px] px-6">
-          <div className="max-w-md w-full p-20 bg-[#0a0a0a] border border-white/10 rounded-[5rem] text-center shadow-2xl relative glass">
-            <h2 className="text-6xl font-bebas mb-14 tracking-widest leading-none text-[#c4a661]">CORE <span className="text-white">ACCESS</span></h2>
-            <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.5em] mb-12">Insira o PIN de Autenticação Nível 3</p>
-            <input type="password" autoFocus className="w-full text-center text-8xl font-black py-10 bg-transparent border-b-2 border-white/10 mb-16 outline-none focus:border-[#c4a661] tracking-[0.6em] transition-all italic" value={adminPinInput} onChange={e => setAdminPinInput(e.target.value)} />
-            <div className="flex gap-6">
-              <button onClick={() => { setShowAdminPinModal(false); setAdminPinInput(''); }} className="flex-1 py-7 text-[11px] font-black uppercase text-gray-700 hover:text-white transition-colors tracking-widest">Abortar</button>
-              <button onClick={() => { if(adminPinInput === config.adminKey) { setIsAdminMode(true); setShowAdminPinModal(false); setAdminPinInput(''); showToast("CORE UNLOCKED"); } else { showToast("PIN DENIED", "error"); } }} className="flex-1 py-7 bg-[#c4a661] text-black rounded-[2.5rem] text-[11px] font-black uppercase tracking-[0.3em] shadow-2xl shadow-[#c4a661]/20 hover:scale-105 transition-transform">AUTENTICAR</button>
+        <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/98 backdrop-blur-2xl px-6">
+          <div className="max-w-xs w-full p-12 bg-[#0a0a0a] border border-white/10 rounded-[3rem] text-center shadow-2xl animate-fade-up">
+            <h2 className="text-4xl font-bebas mb-10 tracking-widest text-[#c4a661]">ACESSO GESTOR</h2>
+            <input 
+              type="password" 
+              autoFocus 
+              className="w-full text-center text-6xl font-black py-8 bg-transparent border-b border-white/10 mb-12 outline-none focus:border-[#c4a661] tracking-[0.4em]" 
+              value={adminPinInput} 
+              onChange={e => setAdminPinInput(e.target.value)} 
+              onKeyDown={e => {
+                if(e.key === 'Enter') {
+                  if(adminPinInput === config.adminKey) { setIsAdminMode(true); setShowAdminPinModal(false); setAdminPinInput(''); showToast("SISTEMA LIBERADO"); } 
+                  else { showToast("PIN INVÁLIDO", "error"); }
+                }
+              }}
+            />
+            <div className="flex gap-4">
+              <button onClick={() => { setShowAdminPinModal(false); setAdminPinInput(''); }} className="flex-1 py-4 text-[9px] font-black uppercase text-white/20 hover:text-white">Voltar</button>
+              <button onClick={() => { 
+                if(adminPinInput === config.adminKey) { setIsAdminMode(true); setShowAdminPinModal(false); setAdminPinInput(''); showToast("SISTEMA LIBERADO"); } 
+                else { showToast("PIN INVÁLIDO", "error"); } 
+              }} className="flex-1 py-4 bg-white text-black rounded-xl text-[9px] font-black uppercase tracking-widest hover:scale-105 transition-all">Entrar</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* HISTÓRICO MODAL (Identificação automática) */}
+      {showHistoryModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/95 backdrop-blur-xl px-4">
+           <div className="max-w-3xl w-full bg-[#0a0a0a] border border-white/10 rounded-[3.5rem] p-10 md:p-16 relative animate-fade-up max-h-[80vh] overflow-y-auto no-scrollbar shadow-2xl">
+              <button onClick={() => setShowHistoryModal(false)} className="absolute top-10 right-10 text-white/30 text-4xl font-light hover:text-white transition-colors">×</button>
+              <h2 className="text-6xl font-bebas mb-6 tracking-widest text-[#c4a661]">MEU <span className="text-white">HISTÓRICO</span></h2>
+              <p className="text-[9px] font-black uppercase text-white/20 tracking-widest mb-10 border-b border-white/5 pb-4 italic">Compras realizadas neste dispositivo ({deviceId.slice(-6).toUpperCase()})</p>
+              
+              <div className="space-y-6">
+                {myOrders.length === 0 ? (
+                  <div className="py-20 text-center opacity-10 flex flex-col items-center gap-6">
+                    <span className="text-6xl">🗒️</span>
+                    <p className="uppercase font-black text-[9px] tracking-widest">Nenhuma compra encontrada neste dispositivo</p>
+                  </div>
+                ) : (
+                  myOrders.map(o => (
+                    <div key={o.id} className="bg-white/[0.02] p-8 rounded-3xl border border-white/5 flex flex-col md:flex-row justify-between items-start md:items-center hover:bg-white/[0.04] transition-all gap-6">
+                      <div className="space-y-2">
+                        <span className="text-[#c4a661] font-black italic text-lg tracking-widest">ID COMPRA: {o.id}</span>
+                        <p className="text-[8px] text-white/30 font-black uppercase tracking-widest">Realizada em: {new Date(o.createdAt).toLocaleDateString('pt-BR')}</p>
+                      </div>
+                      <div className="text-left md:text-right w-full md:w-auto">
+                        <span className={`px-4 py-1.5 rounded-full text-[8px] font-black uppercase tracking-widest ${
+                          o.status === 'Pronto' || o.status === 'Enviado' ? 'bg-green-500/10 text-green-500' : 'bg-white/5 text-white/40'
+                        }`}>
+                          {o.status}
+                        </span>
+                        <p className="text-4xl font-bebas text-white mt-3 italic">{formatCurrency(o.total)}</p>
+                        <button onClick={() => setViewingOrder(o)} className="text-[8px] font-black uppercase text-[#c4a661] mt-2 block w-full text-right underline opacity-40 hover:opacity-100 transition-opacity">Detalhes do Pedido</button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+           </div>
         </div>
       )}
     </div>

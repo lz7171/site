@@ -1,13 +1,6 @@
 
-export type Category = 'Hambúrgueres' | 'Acompanhamentos' | 'Bebidas' | 'Sobremesas';
+export type Category = 'Hambúrgueres' | 'Acompanhamentos' | 'Bebidas' | 'Sobremesas' | 'Especial';
 export type PaymentMethod = 'Cartão (Máquina)' | 'Dinheiro' | 'PIX (na Entrega)';
-
-export interface User {
-  name: string;
-  email: string;
-  password?: string; // Necessário para a simulação de banco de dados
-  photo?: string;
-}
 
 export interface Product {
   id: string;
@@ -29,6 +22,7 @@ export interface OrderItem {
 
 export interface Order {
   id: string;
+  deviceId: string; // Identificador único do dispositivo/navegador
   customerName: string;
   customerPhone: string;
   address: string;
@@ -42,6 +36,13 @@ export interface Order {
   customerEmail: string;
 }
 
+export interface Activity {
+  id: string;
+  type: 'ORDER' | 'STATUS' | 'INVENTORY' | 'SYSTEM';
+  message: string;
+  timestamp: number;
+}
+
 export interface BusinessConfig {
   isOpen: boolean;
   adminKey: string;
@@ -49,20 +50,4 @@ export interface BusinessConfig {
   deliveryFee: number;
   whatsappNumber: string;
   formspreeId: string;
-}
-
-export interface ChatMessage {
-  role: 'user' | 'model';
-  content: string;
-}
-
-// Fix: Added missing Project interface required by ProjectCard.tsx component
-export interface Project {
-  id: string;
-  title: string;
-  description: string;
-  image: string;
-  category: string;
-  techStack: string[];
-  url: string;
 }
